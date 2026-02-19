@@ -1,5 +1,8 @@
+[context.production]
+environment = { NETLIFY_EXPERIMENTAL_BUILD_RUST_SOURCE = "true" }
+
 [functions]
 directory = "netlify/functions"
 
 [functions."topn"]
-schedule = "30 22 * * *"
+schedule = "*/5 * * * *"
