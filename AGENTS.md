@@ -1,7 +1,7 @@
 # CoinMarketCap Top 100 Trends
 
 ## Project
-coinmarketcap_top100_bot (Rust CLI)
+coinmarketcap_top100_bot (Go CLI)
 
 ## Purpose
 Run-once CLI: fetch CoinMarketCap Top-N (N from TOP_N env, default 100), detect new entrants vs previous snapshot in MongoDB, then:
@@ -51,7 +51,7 @@ Truthy rule:
 ## Runtime loading strategy
 - Load templates from disk (repo root).
 - If a template/prompt file is missing/unreadable:
-  - fallback to embedded defaults via `include_str!`.
+  - fallback to embedded defaults via Go constants (or `//go:embed`).
 
 ## Configuration
 
@@ -196,18 +196,17 @@ Recent posts for AI context:
 - AI fails -> use fallback template.
 - No panics; clean errors.
 
-## Netlify scheduled run (Rust wrapper, universal)
-One Rust codebase that can:
+## Netlify scheduled run (Go wrapper, universal)
+One Go codebase that can:
 - run locally as CLI
-- run on Netlify as a Scheduled Function calling the same `run_once(...)`
+- run on Netlify as a Scheduled Function calling the same `RunOnce(...)`
 
 Schedule:
 - Dubai UTC+4 -> 16:20 Dubai == 12:20 UTC -> cron: `20 12 * * *`
-- For Rust (non-JS/TS), schedule is configured in `netlify.toml`.
+- For Go (non-JS/TS), schedule is configured in `netlify.toml`.
 
-Rust on Netlify:
-- Guide: https://www.netlify.com/blog/2021/10/14/write-netlify-functions-in-rust/
-- Example repo: https://github.com/netlify/rust-functions-example
+Go on Netlify:
+- Guide: https://docs.netlify.com/functions/languages/go/
 
 ## Repo docs convention (comment)
 Create symlinks so tools that expect GEMINI.md or CLAUDE.md still read the same agent rules:
