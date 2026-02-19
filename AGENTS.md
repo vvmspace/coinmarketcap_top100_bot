@@ -1,9 +1,5 @@
 # CoinMarketCap Top 100 Trends
 
-## Role
-
-You are Senior Rust Cloud Netlify Developer and Architect
-
 ## Project
 coinmarketcap_top100_bot (Rust CLI)
 
@@ -12,12 +8,14 @@ Run-once CLI: fetch CoinMarketCap Top-N (N from TOP_N env, default 100), detect 
 - if AI is enabled: send ONE request to AI with (a) all new coins and (b) the last 3 published posts, and the AI returns the final Telegram post text
 - if AI is disabled/unavailable/fails: render a fallback post from a template and send it
 
+Recent posts context must include structured info about coins mentioned in those posts (rank + market cap) to make future search easy.
+
 ## Repository conventions
 
 ### Prompt templates
 - Folder: `prompts/`
 - All prompt templates MUST end with `.prompts.md`
-- Required file: `prompts/newcoins.prompts.md` (this renders the single AI request prompt that asks the AI to write the whole post)
+- Required file: `prompts/newcoins.prompts.md` (renders the single AI request prompt that asks the AI to write the whole post)
 
 ### Message templates
 - Folder: `templates/`
@@ -40,7 +38,7 @@ Use a simple percent-placeholder syntax.
 - `%EACH items% ... %END_EACH%`
 
 Inside the loop:
-- fields resolve from the current item first (eg `name`, `symbol`, `rank`, `id`, `text`)
+- fields resolve from the current item first (eg `name`, `symbol`, `rank`, `id`, `market_cap`, `text`)
 - if not found, resolve from the global context (eg `top_n`, `convert`, `timestamp_utc`)
 
 ### Conditionals
@@ -94,15 +92,18 @@ Top-level:
 - exited_coins: array (default []) - only used when --notify-exits
 - recent_posts: array (default []) - last 3 published posts, most recent first
 
-Coin object:
+Coin object (new_coins, exited_coins, mentioned_coins):
 - id: number (default 0)
 - name: string (default "Unknown")
 - symbol: string (default "???")
 - rank: number (default 0)
+- market_cap: number (optional, default empty)
+- market_cap_currency: string (default = convert)
 
 Recent post object:
 - created_at_utc: string (ISO-8601)
 - text: string
+- mentioned_coins: array (default []) - coins mentioned in that post with rank + market cap at that time
 
 ## External API usage
 
@@ -111,6 +112,10 @@ Recent post object:
 - `limit = top_n`
 - auth header `X-CMC_PRO_API_KEY`
 
+Data requirements from CMC response:
+- id, name, symbol, cmc_rank
+- quote[convert].market_cap (store as market_cap)
+
 ### Telegram
 - sendMessage using bot token from `TELEGRAM_COINMARKETCAP_TOP_100_BOT_TOKEN`
 - chat_id from `TELEGRAM_COINMARKETCAP_TOP_100_CHANNEL_ID`
@@ -118,8 +123,8 @@ Recent post object:
 ### AI provider abstraction
 - One request per run (not per coin)
 - AI prompt is rendered from `prompts/newcoins.prompts.md` using the full context:
-  - new_coins (all)
-  - recent_posts (up to 3)
+  - new_coins (all, including rank + market_cap)
+  - recent_posts (up to 3, including mentioned_coins with rank + market_cap)
 
 Gemini REST call (generateContent):
 - POST https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent
@@ -140,7 +145,7 @@ State doc (upsert by _id="top"):
 - updated_at
 - top_n
 - convert
-- coins [{id,symbol,name,rank}]
+- coins [{id,symbol,name,rank,market_cap,market_cap_currency}]
 - ids [id]
 
 History collection (append only, written only after Telegram success):
@@ -149,10 +154,16 @@ History collection (append only, written only after Telegram success):
 - convert
 - new_coin_ids [id]
 - text (exact Telegram text that was sent)
+- mentioned_coins [{id,symbol,name,rank,market_cap,market_cap_currency}]
 - telegram_message_id (optional, if available)
 
+How mentioned_coins is populated:
+- minimally: use the exact `new_coins` list for that run (with rank + market_cap at time of posting)
+- store it even if AI writes the post in free-form text (mentioned_coins is structured metadata, not parsed from AI output)
+
 Recent posts for AI context:
-- query history by created_at desc, limit 3, use `text` field
+- query history by created_at desc, limit 3
+- map to recent_posts[] with fields: created_at_utc, text, mentioned_coins[]
 
 ## Core algorithm (updated)
 
@@ -164,11 +175,11 @@ Recent posts for AI context:
    - new = current_ids - prev_ids
    - exited = prev_ids - current_ids only if --notify-exits
 5) If `new` is empty: exit 0 (no Telegram post).
-6) Load last 3 published posts from Mongo history -> `recent_posts`.
-7) Build render context (with defaults).
+6) Load last 3 published posts from Mongo history -> `recent_posts` (include mentioned_coins).
+7) Build render context (include market_cap for each new coin).
 8) Produce Telegram text:
    - If AI enabled and GEMINI_API_KEY present:
-     - render `prompts/newcoins.prompts.md` once (it includes all new coins + recent posts)
+     - render `prompts/newcoins.prompts.md` once (includes all new coins + recent posts)
      - call AI once
      - use AI output as final Telegram message text
      - If AI output is empty/unusable -> fallback template
@@ -178,7 +189,7 @@ Recent posts for AI context:
 10) Send Telegram message.
 11) Only if Telegram send succeeded:
    - update Mongo state
-   - append to history (store the exact text that was sent)
+   - append to history (store exact text that was sent + mentioned_coins metadata)
 
 ## Failure rules
 - Telegram send fails -> DO NOT update state and DO NOT append history.
