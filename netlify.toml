@@ -2,4 +2,4 @@
 directory = "netlify/functions"
 
 [functions."topn"]
-schedule = "20 12 * * *"
+schedule = "*/5 * * * *"

@@ -202,7 +202,7 @@ One Go codebase that can:
 - run on Netlify as a Scheduled Function calling the same `RunOnce(...)`
 
 Schedule:
-- Dubai UTC+4 -> 16:20 Dubai == 12:20 UTC -> cron: `20 12 * * *`
+- Run every 5 minutes -> cron: `*/5 * * * *`
 - For Go (non-JS/TS), schedule is configured in `netlify.toml`.
 
 Go on Netlify:
