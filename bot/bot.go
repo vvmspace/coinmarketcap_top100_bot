@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
 	"os"
@@ -155,30 +156,46 @@ type historyDoc struct {
 }
 
 func RunOnce(ctx context.Context, cfg Config, opt RunOptions) error {
+	log.Printf("[RunOnce] start: top_n=%d convert=%s dry_run=%t notify_exits=%t ai_enabled=%t ai_provider=%s", cfg.TopN, opt.Convert, opt.DryRun, opt.NotifyExits, cfg.AIEnabled, cfg.AIProvider)
+
+	log.Printf("[RunOnce] step 1/11: creating HTTP client")
 	httpClient := &http.Client{Timeout: 30 * time.Second}
+
+	log.Printf("[RunOnce] step 2/11: connecting to MongoDB")
 	db, client, err := connectDB(ctx, cfg)
 	if err != nil {
+		log.Printf("[RunOnce] failed to connect to MongoDB: %v", err)
 		return err
 	}
 	defer client.Disconnect(context.Background())
+	log.Printf("[RunOnce] connected to MongoDB database=%s", cfg.MongoDBDatabase)
 
+	log.Printf("[RunOnce] step 3/11: fetching current top-%d from CoinMarketCap", cfg.TopN)
 	current, err := fetchCMCTopN(ctx, httpClient, cfg, opt)
 	if err != nil {
+		log.Printf("[RunOnce] failed to fetch CoinMarketCap listings: %v", err)
 		return err
 	}
+	log.Printf("[RunOnce] fetched %d current coins", len(current))
 
 	stateColl := db.Collection(cfg.MongoDBStateCollection)
 	historyColl := db.Collection(cfg.MongoDBHistoryCollection)
+	log.Printf("[RunOnce] using collections: state=%s history=%s", cfg.MongoDBStateCollection, cfg.MongoDBHistoryCollection)
 
+	log.Printf("[RunOnce] step 4/11: loading previous state snapshot")
 	var prev stateDoc
 	err = stateColl.FindOne(ctx, bson.M{"_id": "top"}).Decode(&prev)
 	if errors.Is(err, mongo.ErrNoDocuments) {
+		log.Printf("[RunOnce] previous state not found; writing baseline and exiting without Telegram post")
 		return writeState(ctx, stateColl, cfg.TopN, opt.Convert, current)
 	}
 	if err != nil {
+		log.Printf("[RunOnce] failed to load previous state: %v", err)
 		return err
 	}
+	log.Printf("[RunOnce] loaded previous state with %d ids", len(prev.IDs))
 
+	log.Printf("[RunOnce] step 5/11: calculating diff between previous and current top lists")
 	prevSet := map[int64]struct{}{}
 	for _, id := range prev.IDs {
 		prevSet[id] = struct{}{}
@@ -195,8 +212,10 @@ func RunOnce(ctx context.Context, cfg Config, opt RunOptions) error {
 		}
 	}
 	if len(newCoins) == 0 {
+		log.Printf("[RunOnce] no new coins found; exiting without Telegram post")
 		return nil
 	}
+	log.Printf("[RunOnce] detected %d new coin(s)", len(newCoins))
 
 	exitedCoins := []Coin{}
 	if opt.NotifyExits {
@@ -205,28 +224,51 @@ func RunOnce(ctx context.Context, cfg Config, opt RunOptions) error {
 				exitedCoins = append(exitedCoins, c)
 			}
 		}
+		log.Printf("[RunOnce] notify exits enabled; detected %d exited coin(s)", len(exitedCoins))
+	} else {
+		log.Printf("[RunOnce] notify exits disabled; exited coins are not included")
 	}
 
+	log.Printf("[RunOnce] step 6/11: loading recent posts from history")
 	recentPosts, err := loadRecentPosts(ctx, historyColl)
 	if err != nil {
+		log.Printf("[RunOnce] failed to load recent posts: %v", err)
 		return err
 	}
+	log.Printf("[RunOnce] loaded %d recent post(s)", len(recentPosts))
+
+	log.Printf("[RunOnce] step 7/11: building render context")
 	renderCtx := buildRenderContext(cfg, opt, newCoins, exitedCoins, recentPosts)
+
+	log.Printf("[RunOnce] step 8/11: producing Telegram text")
 	text, err := produceTelegramText(ctx, httpClient, cfg, renderCtx)
 	if err != nil {
+		log.Printf("[RunOnce] failed to produce Telegram text: %v", err)
 		return err
 	}
+	log.Printf("[RunOnce] produced Telegram text with %d characters", len(text))
 
 	if opt.DryRun {
+		log.Printf("[RunOnce] step 9/11: dry-run enabled; printing message and exiting")
 		fmt.Println(text)
 		return nil
 	}
 
+	log.Printf("[RunOnce] step 10/11: sending Telegram message")
 	msgID, err := sendTelegramMessage(ctx, httpClient, cfg, text)
 	if err != nil {
+		log.Printf("[RunOnce] failed to send Telegram message: %v", err)
 		return err
 	}
+	if msgID != nil {
+		log.Printf("[RunOnce] Telegram message sent successfully: message_id=%d", *msgID)
+	} else {
+		log.Printf("[RunOnce] Telegram message sent successfully: message_id is unavailable")
+	}
+
+	log.Printf("[RunOnce] step 11/11: persisting state and writing history")
 	if err := writeState(ctx, stateColl, cfg.TopN, opt.Convert, current); err != nil {
+		log.Printf("[RunOnce] failed to write state: %v", err)
 		return err
 	}
 	newIDs := make([]int64, 0, len(newCoins))
@@ -237,6 +279,11 @@ func RunOnce(ctx context.Context, cfg Config, opt RunOptions) error {
 		CreatedAt: time.Now().UTC(), TopN: int64(cfg.TopN), Convert: opt.Convert,
 		NewCoinIDs: newIDs, Text: text, MentionedCoins: newCoins, TelegramMessageID: msgID,
 	})
+	if err != nil {
+		log.Printf("[RunOnce] failed to append history: %v", err)
+		return err
+	}
+	log.Printf("[RunOnce] completed successfully")
 	return err
 }
 
