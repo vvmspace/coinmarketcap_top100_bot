@@ -20,7 +20,7 @@ func handler(ctx context.Context) (events.APIGatewayProxyResponse, error) {
 		os.Getenv("GEMINI_API_KEY") != "",
 	)
 
-	cfg, err := bot.ConfigFromEnv(false)
+	cfg, err := bot.ConfigFromEnv(false, false)
 	if err != nil {
 		log.Printf("[topn.handler] config validation failed: %v", err)
 		return events.APIGatewayProxyResponse{StatusCode: 500, Body: err.Error()}, nil

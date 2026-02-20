@@ -1,10 +1,9 @@
-Top %top_n% update (%convert%) — new entrants detected at %timestamp_utc%:
+🚀 Top %top_n% update (%convert%)
 
-%EACH new_coins%- #%rank% %name% (%symbol%)
-  Market cap: %market_cap|n/a% %market_cap_currency|%%
+🆕 New in Top %top_n%:
+%EACH new_coins%• #%rank% %name% (%symbol%)%IF market_cap% — mcap: %market_cap% %market_cap_currency|%% %END_IF%
 %END_EACH%
-
-%IF exited_coins%Exited (notify_exits=true):
-%EACH exited_coins%- #%rank% %name% (%symbol%)
-%END_EACH%
-%END_IF%
+%IF exited_coins%
+📉 Out of Top %top_n%:
+%EACH exited_coins%• #%rank% %name% (%symbol%)
+%END_EACH%%END_IF%
