@@ -177,7 +177,7 @@ func RunOnce(ctx context.Context, cfg Config, opt RunOptions) error {
 		return err
 	}
 	log.Printf("[RunOnce] fetched %d current coins", len(current))
-	log.Printf("Входящие top %d %v", cfg.TopN, coinSymbols(current))
+	log.Printf("Incoming top %d %v", cfg.TopN, coinSymbols(current))
 
 	stateColl := db.Collection(cfg.MongoDBStateCollection)
 	historyColl := db.Collection(cfg.MongoDBHistoryCollection)
@@ -195,7 +195,7 @@ func RunOnce(ctx context.Context, cfg Config, opt RunOptions) error {
 		return err
 	}
 	log.Printf("[RunOnce] loaded previous state with %d ids", len(prev.IDs))
-	log.Printf("Из базы top %d %v", cfg.TopN, coinSymbols(prev.Coins))
+	log.Printf("From DB top %d %v", cfg.TopN, coinSymbols(prev.Coins))
 
 	log.Printf("[RunOnce] step 5/11: calculating diff between previous and current top lists")
 	prevSet := map[int64]struct{}{}
