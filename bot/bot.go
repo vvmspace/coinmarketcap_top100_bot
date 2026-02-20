@@ -5,12 +5,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"html"
 	"io"
 	"log"
 	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -516,14 +518,20 @@ func callGemini(ctx context.Context, client *http.Client, cfg Config, prompt str
 }
 
 func sendTelegramMessage(ctx context.Context, client *http.Client, cfg Config, text string, imageURL string) (*int64, error) {
+	formattedText := formatTelegramHTML(text)
+
 	if imageURL != "" {
 		if msgID, err := sendTelegramPhoto(ctx, client, cfg, imageURL, text); err == nil {
 			return msgID, nil
 		}
 	}
 
+	return sendTelegramMessageFormatted(ctx, client, cfg, formattedText)
+}
+
+func sendTelegramMessageFormatted(ctx context.Context, client *http.Client, cfg Config, formattedText string) (*int64, error) {
 	u := fmt.Sprintf("https://api.telegram.org/bot%s/sendMessage", cfg.TelegramToken)
-	payload := map[string]any{"chat_id": cfg.TelegramChannelID, "text": text, "disable_web_page_preview": true}
+	payload := telegramSendMessagePayload(cfg.TelegramChannelID, formattedText)
 	body, _ := json.Marshal(payload)
 	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, u, strings.NewReader(string(body)))
 	req.Header.Set("Content-Type", "application/json")
@@ -553,10 +561,11 @@ func sendTelegramMessage(ctx context.Context, client *http.Client, cfg Config, t
 }
 
 func sendTelegramPhoto(ctx context.Context, client *http.Client, cfg Config, imageURL, caption string) (*int64, error) {
+	formattedCaption := formatTelegramHTML(caption)
 	u := fmt.Sprintf("https://api.telegram.org/bot%s/sendPhoto", cfg.TelegramToken)
-	payload := map[string]any{"chat_id": cfg.TelegramChannelID, "photo": imageURL}
-	if len([]rune(caption)) <= 1024 {
-		payload["caption"] = caption
+	payload := telegramSendPhotoPayload(cfg.TelegramChannelID, imageURL)
+	if len([]rune(formattedCaption)) <= 1024 {
+		payload["caption"] = formattedCaption
 	}
 	body, _ := json.Marshal(payload)
 	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, u, strings.NewReader(string(body)))
@@ -584,7 +593,7 @@ func sendTelegramPhoto(ctx context.Context, client *http.Client, cfg Config, ima
 		return nil, nil
 	}
 	if _, hasCaption := payload["caption"]; !hasCaption {
-		return sendTelegramMessage(ctx, client, cfg, caption, "")
+		return sendTelegramMessageFormatted(ctx, client, cfg, formattedCaption)
 	}
 	return &v, nil
 }
@@ -596,6 +605,22 @@ func sanitizeAIText(text string) string {
 	trimmed = strings.TrimPrefix(trimmed, "markdown")
 	trimmed = strings.TrimSpace(trimmed)
 	return trimmed
+}
+
+var markdownBoldRE = regexp.MustCompile(`\*\*([^*]+)\*\*`)
+
+func telegramSendMessagePayload(chatID, formattedText string) map[string]any {
+	return map[string]any{"chat_id": chatID, "text": formattedText, "parse_mode": "HTML", "disable_web_page_preview": true}
+}
+
+func telegramSendPhotoPayload(chatID, imageURL string) map[string]any {
+	return map[string]any{"chat_id": chatID, "photo": imageURL, "parse_mode": "HTML"}
+}
+
+func formatTelegramHTML(text string) string {
+	escaped := html.EscapeString(strings.TrimSpace(text))
+	escaped = markdownBoldRE.ReplaceAllString(escaped, "<b>$1</b>")
+	return escaped
 }
 
 func firstCoinImageURL(coins []Coin) string {
