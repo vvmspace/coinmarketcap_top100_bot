@@ -32,9 +32,12 @@ const defaultFallbackTemplate = `🚀 New entries in CoinMarketCap Top %top_n% (
 %END_EACH%%END_IF%`
 
 type RunOptions struct {
-	DryRun      bool
-	NotifyExits bool
-	Convert     string
+	DryRun       bool
+	NotifyExits  bool
+	Convert      string
+	SkipMongo    bool
+	TestMessage  string
+	TestImageURL string
 }
 
 type Config struct {
@@ -52,7 +55,7 @@ type Config struct {
 	GeminiAPIKey             string
 }
 
-func ConfigFromEnv(dryRun bool) (Config, error) {
+func ConfigFromEnv(dryRun bool, skipMongo bool) (Config, error) {
 	req := func(name string) (string, error) {
 		v := strings.TrimSpace(os.Getenv(name))
 		if v == "" {
@@ -79,9 +82,9 @@ func ConfigFromEnv(dryRun bool) (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
-	mongoURI, err := req("MONGODB_CONNECTION_STRING")
-	if err != nil {
-		return Config{}, err
+	mongoURI := strings.TrimSpace(os.Getenv("MONGODB_CONNECTION_STRING"))
+	if mongoURI == "" && !skipMongo {
+		return Config{}, fmt.Errorf("missing required env var %s", "MONGODB_CONNECTION_STRING")
 	}
 
 	topN := 100
@@ -128,6 +131,7 @@ type Coin struct {
 	Rank              int64    `bson:"rank" json:"rank"`
 	MarketCap         *float64 `bson:"market_cap,omitempty" json:"market_cap,omitempty"`
 	MarketCapCurrency string   `bson:"market_cap_currency" json:"market_cap_currency"`
+	ImageURL          string   `bson:"image_url,omitempty" json:"image_url,omitempty"`
 }
 
 type RecentPost struct {
@@ -156,10 +160,14 @@ type historyDoc struct {
 }
 
 func RunOnce(ctx context.Context, cfg Config, opt RunOptions) error {
-	log.Printf("[RunOnce] start: top_n=%d convert=%s dry_run=%t notify_exits=%t ai_enabled=%t ai_provider=%s", cfg.TopN, opt.Convert, opt.DryRun, opt.NotifyExits, cfg.AIEnabled, cfg.AIProvider)
+	log.Printf("[RunOnce] start: top_n=%d convert=%s dry_run=%t notify_exits=%t skip_mongo=%t ai_enabled=%t ai_provider=%s", cfg.TopN, opt.Convert, opt.DryRun, opt.NotifyExits, opt.SkipMongo, cfg.AIEnabled, cfg.AIProvider)
 
 	log.Printf("[RunOnce] step 1/11: creating HTTP client")
 	httpClient := &http.Client{Timeout: 30 * time.Second}
+
+	if opt.SkipMongo {
+		return runWithoutMongo(ctx, httpClient, cfg, opt)
+	}
 
 	log.Printf("[RunOnce] step 2/11: connecting to MongoDB")
 	db, client, err := connectDB(ctx, cfg)
@@ -257,7 +265,7 @@ func RunOnce(ctx context.Context, cfg Config, opt RunOptions) error {
 	}
 
 	log.Printf("[RunOnce] step 10/11: sending Telegram message")
-	msgID, err := sendTelegramMessage(ctx, httpClient, cfg, text)
+	msgID, err := sendTelegramMessage(ctx, httpClient, cfg, text, firstCoinImageURL(newCoins))
 	if err != nil {
 		log.Printf("[RunOnce] failed to send Telegram message: %v", err)
 		return err
@@ -287,6 +295,55 @@ func RunOnce(ctx context.Context, cfg Config, opt RunOptions) error {
 	}
 	log.Printf("[RunOnce] completed successfully")
 	return err
+}
+
+func runWithoutMongo(ctx context.Context, httpClient *http.Client, cfg Config, opt RunOptions) error {
+	log.Printf("[RunOnce] skip-mongo mode enabled: testing posting flow without MongoDB")
+	if strings.TrimSpace(opt.TestMessage) != "" {
+		if opt.DryRun {
+			fmt.Println(opt.TestMessage)
+			return nil
+		}
+		msgID, err := sendTelegramMessage(ctx, httpClient, cfg, opt.TestMessage, strings.TrimSpace(opt.TestImageURL))
+		if err != nil {
+			return err
+		}
+		if msgID != nil {
+			log.Printf("[RunOnce] skip-mongo custom test post sent: message_id=%d", *msgID)
+		}
+		return nil
+	}
+
+	current, err := fetchCMCTopN(ctx, httpClient, cfg, opt)
+	if err != nil {
+		return err
+	}
+	if len(current) == 0 {
+		log.Printf("[RunOnce] no coins returned from CoinMarketCap in skip-mongo mode")
+		return nil
+	}
+	newCount := len(current)
+	if newCount > 3 {
+		newCount = 3
+	}
+	newCoins := current[:newCount]
+	renderCtx := buildRenderContext(cfg, opt, newCoins, []Coin{}, []RecentPost{})
+	text, err := produceTelegramText(ctx, httpClient, cfg, renderCtx)
+	if err != nil {
+		return err
+	}
+	if opt.DryRun {
+		fmt.Println(text)
+		return nil
+	}
+	msgID, err := sendTelegramMessage(ctx, httpClient, cfg, text, firstCoinImageURL(newCoins))
+	if err != nil {
+		return err
+	}
+	if msgID != nil {
+		log.Printf("[RunOnce] skip-mongo post sent: message_id=%d", *msgID)
+	}
+	return nil
 }
 
 func connectDB(ctx context.Context, cfg Config) (*mongo.Database, *mongo.Client, error) {
@@ -328,7 +385,56 @@ func fetchCMCTopN(ctx context.Context, client *http.Client, cfg Config, opt RunO
 		}
 		coins = append(coins, coin)
 	}
+	logos, err := fetchCMCLogos(ctx, client, cfg, coins)
+	if err != nil {
+		log.Printf("[fetchCMCTopN] unable to fetch coin logos: %v", err)
+		return coins, nil
+	}
+	for i := range coins {
+		if logo := logos[coins[i].ID]; logo != "" {
+			coins[i].ImageURL = logo
+		}
+	}
 	return coins, nil
+}
+
+func fetchCMCLogos(ctx context.Context, client *http.Client, cfg Config, coins []Coin) (map[int64]string, error) {
+	if len(coins) == 0 {
+		return map[int64]string{}, nil
+	}
+	ids := make([]string, 0, len(coins))
+	for _, c := range coins {
+		ids = append(ids, strconv.FormatInt(c.ID, 10))
+	}
+	u := fmt.Sprintf("https://pro-api.coinmarketcap.com/v2/cryptocurrency/info?id=%s", strings.Join(ids, ","))
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+	req.Header.Set("X-CMC_PRO_API_KEY", cfg.CMCAPIKey)
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		b, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("cmc info error: %s %s", resp.Status, string(b))
+	}
+	var payload map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		return nil, err
+	}
+	out := map[int64]string{}
+	data, _ := payload["data"].(map[string]any)
+	for k, raw := range data {
+		id, err := strconv.ParseInt(k, 10, 64)
+		if err != nil {
+			continue
+		}
+		entry, _ := raw.(map[string]any)
+		if logo := asString(entry["logo"]); logo != "" {
+			out[id] = logo
+		}
+	}
+	return out, nil
 }
 
 func loadRecentPosts(ctx context.Context, coll *mongo.Collection) ([]RecentPost, error) {
@@ -357,8 +463,11 @@ func produceTelegramText(ctx context.Context, client *http.Client, cfg Config, r
 	if cfg.AIEnabled && cfg.AIProvider == "gemini" && cfg.GeminiAPIKey != "" {
 		prompt := RenderTemplate(loadTemplateOrDefault("prompts/newcoins.prompts.md", defaultPrompt), renderCtx)
 		text, err := callGemini(ctx, client, cfg, prompt)
-		if err == nil && strings.TrimSpace(text) != "" {
-			return text, nil
+		if err == nil {
+			clean := sanitizeAIText(text)
+			if clean != "" {
+				return clean, nil
+			}
 		}
 	}
 	return RenderTemplate(fallback, renderCtx), nil
@@ -406,7 +515,13 @@ func callGemini(ctx context.Context, client *http.Client, cfg Config, prompt str
 	return strings.TrimSpace(asString(part["text"])), nil
 }
 
-func sendTelegramMessage(ctx context.Context, client *http.Client, cfg Config, text string) (*int64, error) {
+func sendTelegramMessage(ctx context.Context, client *http.Client, cfg Config, text string, imageURL string) (*int64, error) {
+	if imageURL != "" {
+		if msgID, err := sendTelegramPhoto(ctx, client, cfg, imageURL, text); err == nil {
+			return msgID, nil
+		}
+	}
+
 	u := fmt.Sprintf("https://api.telegram.org/bot%s/sendMessage", cfg.TelegramToken)
 	payload := map[string]any{"chat_id": cfg.TelegramChannelID, "text": text, "disable_web_page_preview": true}
 	body, _ := json.Marshal(payload)
@@ -435,6 +550,61 @@ func sendTelegramMessage(ctx context.Context, client *http.Client, cfg Config, t
 		return nil, nil
 	}
 	return &v, nil
+}
+
+func sendTelegramPhoto(ctx context.Context, client *http.Client, cfg Config, imageURL, caption string) (*int64, error) {
+	u := fmt.Sprintf("https://api.telegram.org/bot%s/sendPhoto", cfg.TelegramToken)
+	payload := map[string]any{"chat_id": cfg.TelegramChannelID, "photo": imageURL}
+	if len([]rune(caption)) <= 1024 {
+		payload["caption"] = caption
+	}
+	body, _ := json.Marshal(payload)
+	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, u, strings.NewReader(string(body)))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		b, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("telegram photo error: %s %s", resp.Status, string(b))
+	}
+	var parsed map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&parsed); err != nil {
+		return nil, err
+	}
+	ok, _ := parsed["ok"].(bool)
+	if !ok {
+		return nil, fmt.Errorf("telegram returned non-ok response for sendPhoto")
+	}
+	result, _ := parsed["result"].(map[string]any)
+	v := asInt64(result["message_id"])
+	if v == 0 {
+		return nil, nil
+	}
+	if _, hasCaption := payload["caption"]; !hasCaption {
+		return sendTelegramMessage(ctx, client, cfg, caption, "")
+	}
+	return &v, nil
+}
+
+func sanitizeAIText(text string) string {
+	trimmed := strings.TrimSpace(text)
+	trimmed = strings.TrimPrefix(trimmed, "```")
+	trimmed = strings.TrimSuffix(trimmed, "```")
+	trimmed = strings.TrimPrefix(trimmed, "markdown")
+	trimmed = strings.TrimSpace(trimmed)
+	return trimmed
+}
+
+func firstCoinImageURL(coins []Coin) string {
+	for _, c := range coins {
+		if strings.TrimSpace(c.ImageURL) != "" {
+			return c.ImageURL
+		}
+	}
+	return ""
 }
 
 func writeState(ctx context.Context, coll *mongo.Collection, topN int, convert string, coins []Coin) error {
