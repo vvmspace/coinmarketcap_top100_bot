@@ -177,6 +177,7 @@ func RunOnce(ctx context.Context, cfg Config, opt RunOptions) error {
 		return err
 	}
 	log.Printf("[RunOnce] fetched %d current coins", len(current))
+	log.Printf("Входящие top %d %v", cfg.TopN, coinSymbols(current))
 
 	stateColl := db.Collection(cfg.MongoDBStateCollection)
 	historyColl := db.Collection(cfg.MongoDBHistoryCollection)
@@ -194,6 +195,7 @@ func RunOnce(ctx context.Context, cfg Config, opt RunOptions) error {
 		return err
 	}
 	log.Printf("[RunOnce] loaded previous state with %d ids", len(prev.IDs))
+	log.Printf("Из базы top %d %v", cfg.TopN, coinSymbols(prev.Coins))
 
 	log.Printf("[RunOnce] step 5/11: calculating diff between previous and current top lists")
 	prevSet := map[int64]struct{}{}
@@ -442,6 +444,14 @@ func writeState(ctx context.Context, coll *mongo.Collection, topN int, convert s
 	}
 	_, err := coll.ReplaceOne(ctx, bson.M{"_id": "top"}, stateDoc{ID: "top", UpdatedAt: time.Now().UTC(), TopN: int64(topN), Convert: convert, Coins: coins, IDs: ids}, options.Replace().SetUpsert(true))
 	return err
+}
+
+func coinSymbols(coins []Coin) []string {
+	symbols := make([]string, 0, len(coins))
+	for _, coin := range coins {
+		symbols = append(symbols, coin.Symbol)
+	}
+	return symbols
 }
 
 func RenderTemplate(t string, ctx map[string]any) string { return renderBlock(t, ctx, nil) }
