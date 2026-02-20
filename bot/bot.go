@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"strconv"
 	"strings"
@@ -672,7 +673,7 @@ func renderBlock(t string, root map[string]any, local map[string]any) string {
 				break
 			}
 			block := t[blockStart : blockStart+endEach]
-			if arr, ok := resolve(local, root, tag).([]any); ok {
+			if arr := toSlice(resolve(local, root, tag)); len(arr) > 0 {
 				for _, it := range arr {
 					if m, ok := toMap(it); ok {
 						out.WriteString(renderBlock(block, root, m))
@@ -746,8 +747,30 @@ func truthy(v any) bool {
 	case string:
 		return vv != ""
 	default:
+		rv := reflect.ValueOf(v)
+		if rv.Kind() == reflect.Slice || rv.Kind() == reflect.Array {
+			return rv.Len() > 0
+		}
 		return true
 	}
+}
+
+func toSlice(v any) []any {
+	if v == nil {
+		return nil
+	}
+	if arr, ok := v.([]any); ok {
+		return arr
+	}
+	rv := reflect.ValueOf(v)
+	if rv.Kind() != reflect.Slice && rv.Kind() != reflect.Array {
+		return nil
+	}
+	out := make([]any, 0, rv.Len())
+	for i := 0; i < rv.Len(); i++ {
+		out = append(out, rv.Index(i).Interface())
+	}
+	return out
 }
 func stringify(v any) string {
 	switch vv := v.(type) {
