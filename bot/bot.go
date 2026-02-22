@@ -18,6 +18,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/joho/godotenv"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
@@ -59,6 +60,7 @@ type Config struct {
 }
 
 func ConfigFromEnv(dryRun bool, skipMongo bool) (Config, error) {
+	_ = godotenv.Load(".env")
 	req := func(name string) (string, error) {
 		v := strings.TrimSpace(os.Getenv(name))
 		if v == "" {
@@ -465,8 +467,10 @@ func produceTelegramText(ctx context.Context, client *http.Client, cfg Config, r
 	fallback := loadTemplateOrDefault("templates/telegram_post_fallback.template.md", defaultFallbackTemplate)
 	if cfg.AIEnabled && cfg.AIProvider == "gemini" && cfg.GeminiAPIKey != "" {
 		prompt := RenderTemplate(loadTemplateOrDefault("prompts/newcoins.prompts.md", defaultPrompt), renderCtx)
+		log.Printf("[Gemini] prompt:\n%s", prompt)
 		text, err := callGemini(ctx, client, cfg, prompt)
 		if err == nil {
+			log.Printf("[Gemini] response:\n%s", text)
 			clean := sanitizeAIText(text)
 			if clean != "" {
 				return clean, nil

@@ -7,3 +7,5 @@
 📉 Out of Top %top_n%:
 %EACH exited_coins%• #%rank% %name% (%symbol%)
 %END_EACH%%END_IF%
+
+[AI is not available]

@@ -10,6 +10,8 @@ Your task:
 - Mention each new coin exactly once.
 - If market cap exists, include it as `$<rounded to nearest million>M`.
 - If data is missing, skip that metric instead of guessing.
+- Add a paraghraph for each (max 3) new tokens.
+- Add some interesting fact or useful tip.
 
 Output format (strict):
 🚀 Top %top_n% update (%convert%)
@@ -38,3 +40,7 @@ mentioned_coins:
 %EACH mentioned_coins%  - id=%id% rank=%rank% name=%name% symbol=%symbol% market_cap=%market_cap|n/a% %market_cap_currency|%%
 %END_EACH%
 %END_EACH%
+
+Output: Telegram post
+
+Telegram post:
