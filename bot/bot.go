@@ -51,6 +51,7 @@ type Config struct {
 	MongoDBConnectionString  string
 	MongoDBDatabase          string
 	MongoDBStateCollection   string
+	MongoDBCoinsCollection   string
 	MongoDBHistoryCollection string
 	TopN                     int
 	AIEnabled                bool
@@ -113,6 +114,7 @@ func ConfigFromEnv(dryRun bool, skipMongo bool) (Config, error) {
 		MongoDBConnectionString:  mongoURI,
 		MongoDBDatabase:          envOr("MONGODB_DB", "cmc_top"),
 		MongoDBStateCollection:   envOr("MONGODB_STATE_COLLECTION", "state"),
+		MongoDBCoinsCollection:   envOr("MONGODB_COINS_COLLECTION", "coins"),
 		MongoDBHistoryCollection: envOr("MONGODB_HISTORY_COLLECTION", "history"),
 		TopN:                     topN,
 		AIEnabled:                aiEnabled,
@@ -150,8 +152,20 @@ type stateDoc struct {
 	UpdatedAt time.Time `bson:"updated_at"`
 	TopN      int64     `bson:"top_n"`
 	Convert   string    `bson:"convert"`
-	Coins     []Coin    `bson:"coins"`
 	IDs       []int64   `bson:"ids"`
+}
+
+type stateCoinDoc struct {
+	StateID string    `bson:"state_id"`
+	ID      int64     `bson:"id"`
+	Name    string    `bson:"name"`
+	Symbol  string    `bson:"symbol"`
+	Rank    int64     `bson:"rank"`
+	Updated time.Time `bson:"updated_at"`
+
+	MarketCap         *float64 `bson:"market_cap,omitempty"`
+	MarketCapCurrency string   `bson:"market_cap_currency"`
+	ImageURL          string   `bson:"image_url,omitempty"`
 }
 
 type historyDoc struct {
@@ -192,23 +206,29 @@ func RunOnce(ctx context.Context, cfg Config, opt RunOptions) error {
 	log.Printf("[RunOnce] fetched %d current coins", len(current))
 	log.Printf("Incoming top %d %v", cfg.TopN, coinSymbols(current))
 
-	stateColl := db.Collection(cfg.MongoDBStateCollection)
-	historyColl := db.Collection(cfg.MongoDBHistoryCollection)
-	log.Printf("[RunOnce] using collections: state=%s history=%s", cfg.MongoDBStateCollection, cfg.MongoDBHistoryCollection)
+	stateCollection := db.Collection(cfg.MongoDBStateCollection)
+	coinsCollection := db.Collection(cfg.MongoDBCoinsCollection)
+	historyCollection := db.Collection(cfg.MongoDBHistoryCollection)
+	log.Printf("[RunOnce] using collections: state=%s coins=%s history=%s", cfg.MongoDBStateCollection, cfg.MongoDBCoinsCollection, cfg.MongoDBHistoryCollection)
 
 	log.Printf("[RunOnce] step 4/11: loading previous state snapshot")
 	var prev stateDoc
-	err = stateColl.FindOne(ctx, bson.M{"_id": "top"}).Decode(&prev)
+	err = stateCollection.FindOne(ctx, bson.M{"_id": "top"}).Decode(&prev)
 	if errors.Is(err, mongo.ErrNoDocuments) {
 		log.Printf("[RunOnce] previous state not found; writing baseline and exiting without Telegram post")
-		return writeState(ctx, stateColl, cfg.TopN, opt.Convert, current)
+		return writeState(ctx, stateCollection, coinsCollection, cfg.TopN, opt.Convert, current)
 	}
 	if err != nil {
 		log.Printf("[RunOnce] failed to load previous state: %v", err)
 		return err
 	}
 	log.Printf("[RunOnce] loaded previous state with %d ids", len(prev.IDs))
-	log.Printf("From DB top %d %v", cfg.TopN, coinSymbols(prev.Coins))
+	prevCoins, err := loadStateCoins(ctx, coinsCollection, "top")
+	if err != nil {
+		log.Printf("[RunOnce] failed to load state coins: %v", err)
+		return err
+	}
+	log.Printf("From DB top %d %v", cfg.TopN, coinSymbols(prevCoins))
 
 	log.Printf("[RunOnce] step 5/11: calculating diff between previous and current top lists")
 	prevSet := map[int64]struct{}{}
@@ -234,7 +254,7 @@ func RunOnce(ctx context.Context, cfg Config, opt RunOptions) error {
 
 	exitedCoins := []Coin{}
 	if opt.NotifyExits {
-		for _, c := range prev.Coins {
+		for _, c := range prevCoins {
 			if _, ok := currentSet[c.ID]; !ok {
 				exitedCoins = append(exitedCoins, c)
 			}
@@ -245,7 +265,7 @@ func RunOnce(ctx context.Context, cfg Config, opt RunOptions) error {
 	}
 
 	log.Printf("[RunOnce] step 6/11: loading recent posts from history")
-	recentPosts, err := loadRecentPosts(ctx, historyColl)
+	recentPosts, err := loadRecentPosts(ctx, historyCollection)
 	if err != nil {
 		log.Printf("[RunOnce] failed to load recent posts: %v", err)
 		return err
@@ -282,7 +302,7 @@ func RunOnce(ctx context.Context, cfg Config, opt RunOptions) error {
 	}
 
 	log.Printf("[RunOnce] step 11/11: persisting state and writing history")
-	if err := writeState(ctx, stateColl, cfg.TopN, opt.Convert, current); err != nil {
+	if err := writeState(ctx, stateCollection, coinsCollection, cfg.TopN, opt.Convert, current); err != nil {
 		log.Printf("[RunOnce] failed to write state: %v", err)
 		return err
 	}
@@ -290,7 +310,7 @@ func RunOnce(ctx context.Context, cfg Config, opt RunOptions) error {
 	for _, c := range newCoins {
 		newIDs = append(newIDs, c.ID)
 	}
-	_, err = historyColl.InsertOne(ctx, historyDoc{
+	_, err = historyCollection.InsertOne(ctx, historyDoc{
 		CreatedAt: time.Now().UTC(), TopN: int64(cfg.TopN), Convert: opt.Convert,
 		NewCoinIDs: newIDs, Text: text, MentionedCoins: newCoins, TelegramMessageID: msgID,
 	})
@@ -442,8 +462,8 @@ func fetchCMCLogos(ctx context.Context, client *http.Client, cfg Config, coins [
 	return out, nil
 }
 
-func loadRecentPosts(ctx context.Context, coll *mongo.Collection) ([]RecentPost, error) {
-	cur, err := coll.Find(ctx, bson.M{}, options.Find().SetSort(bson.M{"created_at": -1}).SetLimit(3))
+func loadRecentPosts(ctx context.Context, historyCollection *mongo.Collection) ([]RecentPost, error) {
+	cur, err := historyCollection.Find(ctx, bson.M{}, options.Find().SetSort(bson.M{"created_at": -1}).SetLimit(3))
 	if err != nil {
 		return nil, err
 	}
@@ -637,13 +657,69 @@ func firstCoinImageURL(coins []Coin) string {
 	return ""
 }
 
-func writeState(ctx context.Context, coll *mongo.Collection, topN int, convert string, coins []Coin) error {
+func writeState(ctx context.Context, stateCollection *mongo.Collection, coinsCollection *mongo.Collection, topN int, convert string, coins []Coin) error {
+	if err := replaceStateCoins(ctx, coinsCollection, "top", coins); err != nil {
+		return err
+	}
+
 	ids := make([]int64, 0, len(coins))
 	for _, c := range coins {
 		ids = append(ids, c.ID)
 	}
-	_, err := coll.ReplaceOne(ctx, bson.M{"_id": "top"}, stateDoc{ID: "top", UpdatedAt: time.Now().UTC(), TopN: int64(topN), Convert: convert, Coins: coins, IDs: ids}, options.Replace().SetUpsert(true))
+	_, err := stateCollection.ReplaceOne(ctx, bson.M{"_id": "top"}, stateDoc{ID: "top", UpdatedAt: time.Now().UTC(), TopN: int64(topN), Convert: convert, IDs: ids}, options.Replace().SetUpsert(true))
 	return err
+}
+
+func replaceStateCoins(ctx context.Context, coinsCollection *mongo.Collection, stateID string, coins []Coin) error {
+	if _, err := coinsCollection.DeleteMany(ctx, bson.M{"state_id": stateID}); err != nil {
+		return err
+	}
+	docs := buildStateCoinDocs(stateID, coins, time.Now().UTC())
+	if len(docs) == 0 {
+		return nil
+	}
+	items := make([]any, 0, len(docs))
+	for _, d := range docs {
+		items = append(items, d)
+	}
+	_, err := coinsCollection.InsertMany(ctx, items)
+	return err
+}
+
+func buildStateCoinDocs(stateID string, coins []Coin, now time.Time) []stateCoinDoc {
+	out := make([]stateCoinDoc, 0, len(coins))
+	for _, coin := range coins {
+		out = append(out, stateCoinDoc{
+			StateID:           stateID,
+			ID:                coin.ID,
+			Name:              coin.Name,
+			Symbol:            coin.Symbol,
+			Rank:              coin.Rank,
+			MarketCap:         coin.MarketCap,
+			MarketCapCurrency: coin.MarketCapCurrency,
+			ImageURL:          coin.ImageURL,
+			Updated:           now,
+		})
+	}
+	return out
+}
+
+func loadStateCoins(ctx context.Context, coinsCollection *mongo.Collection, stateID string) ([]Coin, error) {
+	cur, err := coinsCollection.Find(ctx, bson.M{"state_id": stateID}, options.Find().SetSort(bson.M{"rank": 1}))
+	if err != nil {
+		return nil, err
+	}
+	defer cur.Close(ctx)
+
+	out := []Coin{}
+	for cur.Next(ctx) {
+		var doc stateCoinDoc
+		if err := cur.Decode(&doc); err != nil {
+			return nil, err
+		}
+		out = append(out, Coin{ID: doc.ID, Name: doc.Name, Symbol: doc.Symbol, Rank: doc.Rank, MarketCap: doc.MarketCap, MarketCapCurrency: doc.MarketCapCurrency, ImageURL: doc.ImageURL})
+	}
+	return out, cur.Err()
 }
 
 func coinSymbols(coins []Coin) []string {
