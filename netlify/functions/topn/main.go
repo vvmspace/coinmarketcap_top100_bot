@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	_ "embed"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -11,6 +12,9 @@ import (
 	"github.com/aws/aws-lambda-go/events"
 	"github.com/aws/aws-lambda-go/lambda"
 )
+
+//go:embed swagger.json
+var embeddedSwaggerSpec []byte
 
 func handler(ctx context.Context, req events.APIGatewayProxyRequest) (events.APIGatewayProxyResponse, error) {
 	if req.Path == "/api/docs" || req.Path == "/api/v1/docs" {
@@ -83,6 +87,10 @@ func handler(ctx context.Context, req events.APIGatewayProxyRequest) (events.API
 }
 
 func readSwaggerSpec() ([]byte, error) {
+	if len(embeddedSwaggerSpec) > 0 {
+		return embeddedSwaggerSpec, nil
+	}
+
 	paths := []string{"docs/swagger.json", "../../../docs/swagger.json"}
 	for _, p := range paths {
 		content, err := os.ReadFile(p)
