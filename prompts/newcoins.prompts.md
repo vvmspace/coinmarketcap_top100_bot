@@ -41,6 +41,6 @@ mentioned_coins:
 %END_EACH%
 %END_EACH%
 
-Output: Telegram post
+Output: Telegram post ready for posting.
 
 Telegram post:
