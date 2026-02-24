@@ -132,13 +132,14 @@ func envOr(name, def string) string {
 }
 
 type Coin struct {
-	ID                int64    `bson:"id" json:"id"`
-	Name              string   `bson:"name" json:"name"`
-	Symbol            string   `bson:"symbol" json:"symbol"`
-	Rank              int64    `bson:"rank" json:"rank"`
-	MarketCap         *float64 `bson:"market_cap,omitempty" json:"market_cap,omitempty"`
-	MarketCapCurrency string   `bson:"market_cap_currency" json:"market_cap_currency"`
-	ImageURL          string   `bson:"image_url,omitempty" json:"image_url,omitempty"`
+	ID                int64      `bson:"id" json:"id"`
+	Name              string     `bson:"name" json:"name"`
+	Symbol            string     `bson:"symbol" json:"symbol"`
+	Rank              int64      `bson:"rank" json:"rank"`
+	TickTimestamp     *time.Time `bson:"tick_timestamp,omitempty" json:"tick_timestamp,omitempty"`
+	MarketCap         *float64   `bson:"market_cap,omitempty" json:"market_cap,omitempty"`
+	MarketCapCurrency string     `bson:"market_cap_currency" json:"market_cap_currency"`
+	ImageURL          string     `bson:"image_url,omitempty" json:"image_url,omitempty"`
 }
 
 type RecentPost struct {
@@ -156,14 +157,15 @@ type stateDoc struct {
 }
 
 type stateCoinDoc struct {
-	StateID string    `bson:"state_id"`
-	ID      int64     `bson:"id"`
-	Name    string    `bson:"name"`
-	Symbol  string    `bson:"symbol"`
-	Rank    int64     `bson:"rank"`
-	Updated time.Time `bson:"updated_at"`
-	Created time.Time `bson:"created_at,omitempty"`
-	IsActive bool     `bson:"is_active"`
+	StateID       string    `bson:"state_id"`
+	ID            int64     `bson:"id"`
+	Name          string    `bson:"name"`
+	Symbol        string    `bson:"symbol"`
+	Rank          int64     `bson:"rank"`
+	TickTimestamp time.Time `bson:"tick_timestamp"`
+	Updated       time.Time `bson:"updated_at"`
+	Created       time.Time `bson:"created_at,omitempty"`
+	IsActive      bool      `bson:"is_active"`
 
 	MarketCap         *float64 `bson:"market_cap,omitempty"`
 	MarketCapCurrency string   `bson:"market_cap_currency"`
@@ -382,6 +384,7 @@ func connectDB(ctx context.Context, cfg Config) (*mongo.Database, *mongo.Client,
 }
 
 func fetchCMCTopN(ctx context.Context, client *http.Client, cfg Config, opt RunOptions) ([]Coin, error) {
+	now := time.Now().UTC()
 	u := fmt.Sprintf("https://pro-api.coinmarketcap.com/v1/cryptocurrency/listings/latest?start=1&limit=%d&convert=%s&sort=market_cap&sort_dir=desc", cfg.TopN, url.QueryEscape(opt.Convert))
 	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 	req.Header.Set("X-CMC_PRO_API_KEY", cfg.CMCAPIKey)
@@ -402,7 +405,7 @@ func fetchCMCTopN(ctx context.Context, client *http.Client, cfg Config, opt RunO
 	coins := make([]Coin, 0, len(data))
 	for _, item := range data {
 		m, _ := item.(map[string]any)
-		coin := Coin{ID: asInt64(m["id"]), Name: asStringDef(m["name"], "Unknown"), Symbol: asStringDef(m["symbol"], "???"), Rank: asInt64(m["cmc_rank"]), MarketCapCurrency: opt.Convert}
+		coin := Coin{ID: asInt64(m["id"]), Name: asStringDef(m["name"], "Unknown"), Symbol: asStringDef(m["symbol"], "???"), Rank: asInt64(m["cmc_rank"]), TickTimestamp: &now, MarketCapCurrency: opt.Convert}
 		if quote, ok := m["quote"].(map[string]any); ok {
 			if curr, ok := quote[opt.Convert].(map[string]any); ok {
 				if mc, ok := asFloat(curr["market_cap"]); ok {
@@ -690,6 +693,7 @@ func replaceStateCoins(ctx context.Context, coinsCollection *mongo.Collection, s
 					"name":                d.Name,
 					"symbol":              d.Symbol,
 					"rank":                d.Rank,
+					"tick_timestamp":      d.TickTimestamp,
 					"market_cap":          d.MarketCap,
 					"market_cap_currency": d.MarketCapCurrency,
 					"image_url":           d.ImageURL,
@@ -716,6 +720,7 @@ func buildStateCoinDocs(stateID string, coins []Coin, now time.Time) []stateCoin
 			Name:              coin.Name,
 			Symbol:            coin.Symbol,
 			Rank:              coin.Rank,
+			TickTimestamp:     now,
 			MarketCap:         coin.MarketCap,
 			MarketCapCurrency: coin.MarketCapCurrency,
 			ImageURL:          coin.ImageURL,
@@ -739,9 +744,53 @@ func loadStateCoins(ctx context.Context, coinsCollection *mongo.Collection, stat
 		if err := cur.Decode(&doc); err != nil {
 			return nil, err
 		}
-		out = append(out, Coin{ID: doc.ID, Name: doc.Name, Symbol: doc.Symbol, Rank: doc.Rank, MarketCap: doc.MarketCap, MarketCapCurrency: doc.MarketCapCurrency, ImageURL: doc.ImageURL})
+		tickTS := doc.TickTimestamp.UTC()
+		out = append(out, Coin{ID: doc.ID, Name: doc.Name, Symbol: doc.Symbol, Rank: doc.Rank, TickTimestamp: &tickTS, MarketCap: doc.MarketCap, MarketCapCurrency: doc.MarketCapCurrency, ImageURL: doc.ImageURL})
 	}
 	return out, cur.Err()
+}
+
+func ReplayLastTick(ctx context.Context, cfg Config, convert string) (string, *int64, error) {
+	httpClient := &http.Client{Timeout: 30 * time.Second}
+	db, client, err := connectDB(ctx, cfg)
+	if err != nil {
+		return "", nil, err
+	}
+	defer client.Disconnect(context.Background())
+
+	historyCollection := db.Collection(cfg.MongoDBHistoryCollection)
+	var last historyDoc
+	err = historyCollection.FindOne(ctx, bson.M{}, options.FindOne().SetSort(bson.M{"created_at": -1})).Decode(&last)
+	if err != nil {
+		if errors.Is(err, mongo.ErrNoDocuments) {
+			return "", nil, fmt.Errorf("no previous tick found in history")
+		}
+		return "", nil, err
+	}
+
+	msgID, err := sendTelegramMessage(ctx, httpClient, cfg, last.Text, firstCoinImageURL(last.MentionedCoins))
+	if err != nil {
+		return "", nil, err
+	}
+
+	newIDs := make([]int64, 0, len(last.MentionedCoins))
+	for _, c := range last.MentionedCoins {
+		newIDs = append(newIDs, c.ID)
+	}
+	_, err = historyCollection.InsertOne(ctx, historyDoc{
+		CreatedAt:         time.Now().UTC(),
+		TopN:              last.TopN,
+		Convert:           convert,
+		NewCoinIDs:        newIDs,
+		Text:              last.Text,
+		MentionedCoins:    last.MentionedCoins,
+		TelegramMessageID: msgID,
+	})
+	if err != nil {
+		return "", nil, err
+	}
+
+	return last.Text, msgID, nil
 }
 
 func coinSymbols(coins []Coin) []string {

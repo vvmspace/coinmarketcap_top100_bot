@@ -1,0 +1,46 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "CoinMarketCap Top 100 Bot API",
+    "version": "1.0.0",
+    "description": "Manual operations API for the CoinMarketCap top tick bot."
+  },
+  "paths": {
+    "/api/v1/tick": {
+      "post": {
+        "summary": "Repost the latest tick",
+        "description": "Reads the latest post from MongoDB history and publishes it to Telegram again.",
+        "responses": {
+          "200": {
+            "description": "Tick reposted successfully",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "ok": {"type": "boolean"},
+                    "message_id": {"type": "integer", "format": "int64"},
+                    "text": {"type": "string"}
+                  }
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Failed to process repost",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {"type": "string"}
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
