@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log"
 	"os"
 
@@ -12,8 +13,16 @@ import (
 )
 
 func handler(ctx context.Context, req events.APIGatewayProxyRequest) (events.APIGatewayProxyResponse, error) {
+	if req.Path == "/api/docs" || req.Path == "/api/v1/docs" {
+		return events.APIGatewayProxyResponse{
+			StatusCode: 200,
+			Headers:    map[string]string{"Content-Type": "text/html; charset=utf-8"},
+			Body:       swaggerUIPage(req.Path),
+		}, nil
+	}
+
 	if req.Path == "/swagger.json" || req.Path == "/api/v1/swagger.json" {
-		content, err := os.ReadFile("docs/swagger.json")
+		content, err := readSwaggerSpec()
 		if err != nil {
 			return events.APIGatewayProxyResponse{StatusCode: 500, Body: `{"error":"unable to load swagger"}`}, nil
 		}
@@ -71,6 +80,44 @@ func handler(ctx context.Context, req events.APIGatewayProxyRequest) (events.API
 	}
 	log.Printf("[topn.handler] invocation completed successfully")
 	return events.APIGatewayProxyResponse{StatusCode: 200, Body: "ok"}, nil
+}
+
+func readSwaggerSpec() ([]byte, error) {
+	paths := []string{"docs/swagger.json", "../../../docs/swagger.json"}
+	for _, p := range paths {
+		content, err := os.ReadFile(p)
+		if err == nil {
+			return content, nil
+		}
+	}
+	return nil, os.ErrNotExist
+}
+
+func swaggerUIPage(path string) string {
+	jsonPath := "/api/v1/swagger.json"
+	if path == "/api/docs" {
+		jsonPath = "/swagger.json"
+	}
+
+	return fmt.Sprintf(`<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>CoinMarketCap Top100 Bot API Docs</title>
+  <link rel="stylesheet" href="https://unpkg.com/swagger-ui-dist@5/swagger-ui.css" />
+</head>
+<body>
+  <div id="swagger-ui"></div>
+  <script src="https://unpkg.com/swagger-ui-dist@5/swagger-ui-bundle.js"></script>
+  <script>
+    window.ui = SwaggerUIBundle({
+      url: '%s',
+      dom_id: '#swagger-ui'
+    });
+  </script>
+</body>
+</html>`, jsonPath)
 }
 
 func jsonError(status int, err error) events.APIGatewayProxyResponse {

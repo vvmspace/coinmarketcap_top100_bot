@@ -3,3 +3,23 @@ directory = "netlify/functions"
 
 [functions."topn"]
 schedule = "*/5 * * * *"
+
+[[redirects]]
+from = "/api/docs"
+to = "/.netlify/functions/topn/api/docs"
+status = 200
+
+[[redirects]]
+from = "/api/v1/docs"
+to = "/.netlify/functions/topn/api/v1/docs"
+status = 200
+
+[[redirects]]
+from = "/swagger.json"
+to = "/.netlify/functions/topn/swagger.json"
+status = 200
+
+[[redirects]]
+from = "/api/v1/swagger.json"
+to = "/.netlify/functions/topn/api/v1/swagger.json"
+status = 200
