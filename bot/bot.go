@@ -162,6 +162,8 @@ type stateCoinDoc struct {
 	Symbol  string    `bson:"symbol"`
 	Rank    int64     `bson:"rank"`
 	Updated time.Time `bson:"updated_at"`
+	Created time.Time `bson:"created_at,omitempty"`
+	IsActive bool     `bson:"is_active"`
 
 	MarketCap         *float64 `bson:"market_cap,omitempty"`
 	MarketCapCurrency string   `bson:"market_cap_currency"`
@@ -671,19 +673,38 @@ func writeState(ctx context.Context, stateCollection *mongo.Collection, coinsCol
 }
 
 func replaceStateCoins(ctx context.Context, coinsCollection *mongo.Collection, stateID string, coins []Coin) error {
-	if _, err := coinsCollection.DeleteMany(ctx, bson.M{"state_id": stateID}); err != nil {
+	now := time.Now().UTC()
+	if _, err := coinsCollection.UpdateMany(ctx, bson.M{"state_id": stateID}, bson.M{"$set": bson.M{"is_active": false, "updated_at": now}}); err != nil {
 		return err
 	}
-	docs := buildStateCoinDocs(stateID, coins, time.Now().UTC())
+	docs := buildStateCoinDocs(stateID, coins, now)
 	if len(docs) == 0 {
 		return nil
 	}
-	items := make([]any, 0, len(docs))
 	for _, d := range docs {
-		items = append(items, d)
+		_, err := coinsCollection.UpdateOne(
+			ctx,
+			bson.M{"state_id": stateID, "id": d.ID},
+			bson.M{
+				"$set": bson.M{
+					"name":                d.Name,
+					"symbol":              d.Symbol,
+					"rank":                d.Rank,
+					"market_cap":          d.MarketCap,
+					"market_cap_currency": d.MarketCapCurrency,
+					"image_url":           d.ImageURL,
+					"is_active":           true,
+					"updated_at":          now,
+				},
+				"$setOnInsert": bson.M{"created_at": now},
+			},
+			options.Update().SetUpsert(true),
+		)
+		if err != nil {
+			return err
+		}
 	}
-	_, err := coinsCollection.InsertMany(ctx, items)
-	return err
+	return nil
 }
 
 func buildStateCoinDocs(stateID string, coins []Coin, now time.Time) []stateCoinDoc {
@@ -698,6 +719,7 @@ func buildStateCoinDocs(stateID string, coins []Coin, now time.Time) []stateCoin
 			MarketCap:         coin.MarketCap,
 			MarketCapCurrency: coin.MarketCapCurrency,
 			ImageURL:          coin.ImageURL,
+			IsActive:          true,
 			Updated:           now,
 		})
 	}
@@ -705,7 +727,7 @@ func buildStateCoinDocs(stateID string, coins []Coin, now time.Time) []stateCoin
 }
 
 func loadStateCoins(ctx context.Context, coinsCollection *mongo.Collection, stateID string) ([]Coin, error) {
-	cur, err := coinsCollection.Find(ctx, bson.M{"state_id": stateID}, options.Find().SetSort(bson.M{"rank": 1}))
+	cur, err := coinsCollection.Find(ctx, bson.M{"state_id": stateID, "is_active": true}, options.Find().SetSort(bson.M{"rank": 1}))
 	if err != nil {
 		return nil, err
 	}
